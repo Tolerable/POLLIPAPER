@@ -5,6 +5,7 @@ from requests.exceptions import RequestException
 import textwrap
 from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
 import io
+import re
 import random
 import threading
 from collections import deque
@@ -18,6 +19,7 @@ from comtypes import GUID
 import sys
 import pythoncom
 import winreg
+import piexif
 
 # Define HRESULT
 HRESULT = ctypes.HRESULT
@@ -105,7 +107,7 @@ class PollinationsBackgroundSetter:
     def __init__(self, master):
         self.master = master
         master.title("POLLIPAPER")
-        master.geometry("650x450")
+        master.geometry("650x600")
 
         self.enhance = tk.BooleanVar()
         self.wallpaper_style = tk.StringVar(value="fill")
@@ -113,11 +115,13 @@ class PollinationsBackgroundSetter:
         self.interval = max(300, 60 * 5)  # Minimum 5 minutes
         self.always_on_top = tk.BooleanVar(value=False)
         
+        self.model = tk.StringVar(value="flux")
+        
         self.use_weather = tk.BooleanVar(value=False)
         self.overlay_weather = tk.BooleanVar(value=False)
         self.overlay_opacity = tk.IntVar(value=128)  # 0-255 for opacity
         self.overlay_position = tk.StringVar(value="top_right")
- 
+     
         self.use_drop_shadow = tk.BooleanVar(value=False)
         self.weather_api_key = tk.StringVar()
         self.weather_fetcher = weather_fetcher
@@ -126,15 +130,22 @@ class PollinationsBackgroundSetter:
 
         self.overlay_color = tk.StringVar(value="#000000")
 
+        self.submitted_prompt = tk.StringVar()
+        self.returned_prompt = tk.StringVar()
+        self.negative_prompt = tk.StringVar()
+        self.nsfw_status = tk.StringVar()
+        self.weather_conditions = tk.StringVar()
+        self.current_weather_conditions = "N/A"
+
+        self.is_running = False  # Initialize is_running before calling setup_ui and load_settings
+        self.setter_thread = None
+        self.current_request_id = None
+
         self.setup_ui()
         self.load_settings()
         self.update_position_options()
         self.prompt_history = deque(maxlen=20)
         self.load_history()
-        
-        self.is_running = False
-        self.setter_thread = None
-        self.current_request_id = None
 
         self.master.protocol("WM_DELETE_WINDOW", self.on_closing)
         
@@ -147,7 +158,7 @@ class PollinationsBackgroundSetter:
             "stretch": (1920, 1080),
             "fit": (1920, 1080),
             "fill": (1920, 1080),
-            "span": (1920, 540),
+            "span": (3840, 1080),
         }
         self.wallpaper_style.trace_add('write', self.update_position_options)
         
@@ -155,6 +166,7 @@ class PollinationsBackgroundSetter:
         self.frame = ttk.Frame(self.master, padding="10")
         self.frame.pack(fill=tk.BOTH, expand=True)
 
+        # Prompt input
         prompt_label = ttk.Label(self.frame, text="Prompt:")
         prompt_label.pack(fill=tk.X)
 
@@ -168,6 +180,7 @@ class PollinationsBackgroundSetter:
         prompt_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.prompt_entry.config(yscrollcommand=prompt_scrollbar.set)
 
+        # History dropdown
         history_label = ttk.Label(self.frame, text="History:")
         history_label.pack(fill=tk.X)
         self.history_var = tk.StringVar()
@@ -175,10 +188,11 @@ class PollinationsBackgroundSetter:
         self.history_dropdown.pack(fill=tk.X)
         self.history_dropdown.bind('<<ComboboxSelected>>', self.on_history_select)
 
+        # Options frame
         options_frame = ttk.LabelFrame(self.frame, text="Options", padding="5")
         options_frame.pack(fill=tk.X, pady=10)
 
-        # First row
+        # First row of options
         first_row = ttk.Frame(options_frame)
         first_row.pack(fill=tk.X)
 
@@ -191,24 +205,45 @@ class PollinationsBackgroundSetter:
         style_options = ["fill", "fit", "stretch", "tile", "center", "span"]
         ttk.Combobox(first_row, textvariable=self.wallpaper_style, values=style_options, width=10).pack(side=tk.LEFT)
 
-        # Second row
-        second_row = ttk.Frame(options_frame)
-        second_row.pack(fill=tk.X, pady=(5, 0))
+        ttk.Label(first_row, text="Model:").pack(side=tk.LEFT, padx=(10, 0))
+        model_options = ["flux", "flux-realism", "flux-anime", "flux-3d", "any-dark", "turbo"]
+        ttk.Combobox(first_row, textvariable=self.model, values=model_options, width=15).pack(side=tk.LEFT)
 
-        ttk.Label(second_row, text="Overlay Opacity:").pack(side=tk.LEFT)
-        ttk.Scale(second_row, from_=0, to=255, variable=self.overlay_opacity, orient=tk.HORIZONTAL, length=100).pack(side=tk.LEFT, padx=(0, 10))
+        # Overlay settings
+        overlay_frame = ttk.LabelFrame(self.frame, text="Overlay Settings", padding="5")
+        overlay_frame.pack(fill=tk.X, pady=10)
 
-        ttk.Label(second_row, text="Position:").pack(side=tk.LEFT)
-        self.position_dropdown = ttk.Combobox(second_row, textvariable=self.overlay_position, width=15)
+        ttk.Label(overlay_frame, text="Opacity:").pack(side=tk.LEFT)
+        ttk.Scale(overlay_frame, from_=0, to=255, variable=self.overlay_opacity, orient=tk.HORIZONTAL, length=100).pack(side=tk.LEFT, padx=(0, 10))
+
+        ttk.Label(overlay_frame, text="Position:").pack(side=tk.LEFT)
+        self.position_dropdown = ttk.Combobox(overlay_frame, textvariable=self.overlay_position, width=15)
         self.position_dropdown.pack(side=tk.LEFT, padx=(0, 10))
-        self.update_position_options() 
 
-        ttk.Label(second_row, text="Overlay Color:").pack(side=tk.LEFT)
-        self.color_button = tk.Button(second_row, width=2, command=self.choose_overlay_color)
+        ttk.Label(overlay_frame, text="Color:").pack(side=tk.LEFT)
+        self.color_button = tk.Button(overlay_frame, width=2, command=self.choose_overlay_color)
         self.color_button.pack(side=tk.LEFT, padx=(0, 10))
-        self.update_color_button()
 
-        ttk.Checkbutton(second_row, text="Drop Shadow", variable=self.use_drop_shadow).pack(side=tk.LEFT)
+        ttk.Checkbutton(overlay_frame, text="Drop Shadow", variable=self.use_drop_shadow).pack(side=tk.LEFT)
+
+        # Current Image Information frame
+        info_frame = ttk.LabelFrame(self.frame, text="Current Image Information", padding="5")
+        info_frame.pack(fill=tk.BOTH, expand=True, pady=10)
+
+        # Submitted Prompt
+        ttk.Label(info_frame, text="Submitted Prompt:").pack(anchor=tk.W)
+        self.submitted_prompt_display = tk.Text(info_frame, wrap=tk.WORD, height=2, state='disabled')
+        self.submitted_prompt_display.pack(fill=tk.X)
+
+        # Returned Prompt
+        ttk.Label(info_frame, text="Returned Prompt:").pack(anchor=tk.W)
+        self.returned_prompt_display = tk.Text(info_frame, wrap=tk.WORD, height=2, state='disabled')
+        self.returned_prompt_display.pack(fill=tk.X)
+
+        # Weather Conditions
+        ttk.Label(info_frame, text="Weather Conditions:").pack(anchor=tk.W)
+        self.weather_conditions_display = tk.Text(info_frame, wrap=tk.WORD, height=1, state='disabled')
+        self.weather_conditions_display.pack(fill=tk.X)
 
         # Menu setup
         menubar = tk.Menu(self.master)
@@ -228,12 +263,15 @@ class PollinationsBackgroundSetter:
         menubar.add_cascade(label="Options", menu=options_menu)
         self.master.config(menu=menubar)
 
+        self.update_position_options()
+        self.update_color_button()
+    
         self.current_prompt_label = ttk.Label(self.frame, text="Current Prompt:")
         self.current_prompt_label.pack(fill=tk.X, pady=(10, 0))
         
         self.current_prompt_display = tk.Text(self.frame, wrap=tk.WORD, height=3, state='disabled')
         self.current_prompt_display.pack(fill=tk.X)
-    
+
     def update_position_options(self, *args):
         if self.wallpaper_style.get() == "span":
             options = ["left_top_left", "left_top_right", "left_bottom_left", "left_bottom_right",
@@ -256,10 +294,47 @@ class PollinationsBackgroundSetter:
             self.color_button.config(bg=self.overlay_color.get())
 
     def update_current_prompt_display(self, prompt):
-        self.current_prompt_display.config(state='normal')
-        self.current_prompt_display.delete(1.0, tk.END)
-        self.current_prompt_display.insert(tk.END, prompt)
-        self.current_prompt_display.config(state='disabled')
+        try:
+            if hasattr(self, 'current_prompt_display'):
+                self.current_prompt_display.config(state='normal')
+                self.current_prompt_display.delete(1.0, tk.END)
+                self.current_prompt_display.insert(tk.END, prompt)
+                self.current_prompt_display.config(state='disabled')
+            else:
+                print("Error: current_prompt_display widget not found")
+        except Exception as e:
+            print(f"Error updating current prompt display: {e}")
+
+    def update_prompt_info(self, original_prompt, returned_prompt):
+        print(f"Updating prompts - Original: {original_prompt}, Returned: {returned_prompt}")
+        
+        self.submitted_prompt.set(original_prompt)
+        self.returned_prompt.set(returned_prompt)
+        
+        # Update the Text widgets
+        if hasattr(self, 'submitted_prompt_display'):
+            self.submitted_prompt_display.config(state='normal')
+            self.submitted_prompt_display.delete(1.0, tk.END)
+            self.submitted_prompt_display.insert(tk.END, original_prompt)
+            self.submitted_prompt_display.config(state='disabled')
+        
+        if hasattr(self, 'returned_prompt_display'):
+            self.returned_prompt_display.config(state='normal')
+            self.returned_prompt_display.delete(1.0, tk.END)
+            self.returned_prompt_display.insert(tk.END, returned_prompt)
+            self.returned_prompt_display.config(state='disabled')
+        
+        if self.use_weather.get():
+            self.weather_conditions.set(self.current_weather_conditions)
+        else:
+            self.weather_conditions.set('N/A')
+        
+        # Update weather conditions display
+        if hasattr(self, 'weather_conditions_display'):
+            self.weather_conditions_display.config(state='normal')
+            self.weather_conditions_display.delete(1.0, tk.END)
+            self.weather_conditions_display.insert(tk.END, self.weather_conditions.get())
+            self.weather_conditions_display.config(state='disabled')
 
     def set_weather_api_key(self):
         key = simpledialog.askstring("API Key", "Enter your OpenWeatherMap API Key:", show='*')
@@ -326,7 +401,10 @@ class PollinationsBackgroundSetter:
             weather_data = self.weather_fetcher.fetch_weather_data()
             if weather_data:
                 prompt = self.generate_weather_prompt(weather_data)
-                self.update_current_prompt_display(prompt)
+                try:
+                    self.update_current_prompt_display(prompt)
+                except Exception as e:
+                    print(f"Error updating current prompt display: {e}")
             else:
                 messagebox.showerror("Weather Data Error", "Failed to fetch weather data.")
                 return
@@ -340,7 +418,10 @@ class PollinationsBackgroundSetter:
                     messagebox.showerror("Missing Prompt", "Please enter a prompt or ensure there is one in history.")
                     return
             self.add_to_history(prompt)
-            self.update_current_prompt_display(prompt)
+            try:
+                self.update_current_prompt_display(prompt)
+            except Exception as e:
+                print(f"Error updating current prompt display: {e}")
 
         self.is_running = True
         self.start_stop_button.config(text="Stop")
@@ -368,7 +449,6 @@ class PollinationsBackgroundSetter:
     def fetch_and_set_background(self, prompt, request_id):
         max_retries = 5
         retry_delay = 5
-
         for attempt in range(max_retries):
             try:
                 seed = random.randint(1, 1000000)
@@ -376,7 +456,7 @@ class PollinationsBackgroundSetter:
                 style = self.wallpaper_style.get()
                 
                 width, height = self.get_image_dimensions(style)
-                
+                print(f"Style: {style}, Dimensions: {width}x{height}")
                 weather_data = None
                 if self.use_weather.get() or self.overlay_weather.get():
                     weather_data = self.weather_fetcher.fetch_weather_data()
@@ -384,22 +464,54 @@ class PollinationsBackgroundSetter:
                         prompt = self.generate_weather_prompt(weather_data)
                     elif self.use_weather.get():
                         print("Failed to fetch weather data. Using original prompt.")
-
-                url = f"https://image.pollinations.ai/prompt/{prompt}, photographic_style?nologo=true&nofeed=true&enhance={enhance_param}&seed={seed}&width={width}&height={height}"
-
+                url = f"https://image.pollinations.ai/prompt/{prompt}?nologo=true&nofeed=true&model={self.model.get()}&enhance={enhance_param}&seed={seed}&width={width}&height={height}"
                 print(f"Attempt {attempt + 1}: Fetching image with URL: {url}")
                 
-                print(f"Style: {style}, Dimensions: {width}x{height}")
                 response = requests.get(url, timeout=45)
                 
                 if response.status_code == 200 and request_id == self.current_request_id:
                     print("Image fetched successfully.")
-                    image = Image.open(io.BytesIO(response.content))
+                    image_data = response.content
                     
+                    try:
+                        image = Image.open(io.BytesIO(image_data))
+                        actual_width, actual_height = image.size
+                        print(f"Actual image dimensions: {actual_width}x{actual_height}")
+                        
+                        # Extract metadata from EXIF
+                        exif_data = image.info.get('exif', b'')
+                        if exif_data:
+                            # Find the JSON string in the EXIF data
+                            json_match = re.search(b'{"prompt":.*}', exif_data)
+                            if json_match:
+                                json_str = json_match.group(0).decode('utf-8')
+                                try:
+                                    metadata_dict = json.loads(json_str)
+                                    print(f"Parsed metadata: {metadata_dict}")
+                                    returned_prompt = metadata_dict.get('prompt', 'Unable to retrieve returned prompt')
+                                    original_prompt = metadata_dict.get('originalPrompt', prompt)
+                                    self.update_prompt_info(original_prompt, returned_prompt)
+                                except json.JSONDecodeError as e:
+                                    print(f"Failed to parse JSON in metadata: {e}")
+                                    self.update_prompt_info(prompt, 'Unable to parse metadata')
+                            else:
+                                print("No JSON data found in EXIF")
+                                self.update_prompt_info(prompt, 'No JSON data found in metadata')
+                        else:
+                            print("No EXIF data found in the image.")
+                            self.update_prompt_info(prompt, 'No metadata found')
+                        
+                        if (actual_width, actual_height) != (width, height):
+                            print(f"Warning: Received image dimensions ({actual_width}x{actual_height}) "
+                                  f"do not match requested dimensions ({width}x{height})")
+                    except UnidentifiedImageError:
+                        print(f"Error: Received data is not a valid image. Retrying...")
+                        raise  # This will trigger the retry mechanism
+            
                     image_path = os.path.join(self.image_dir, f"background_{int(time.time())}.png")
                     image.save(image_path, 'PNG')
                     print(f"Image saved to {image_path}")
-
+                    
                     if self.overlay_weather.get() and weather_data:
                         try:
                             image = self.apply_weather_overlay(image_path, weather_data)
@@ -407,14 +519,14 @@ class PollinationsBackgroundSetter:
                             print(f"Weather overlay added to {image_path}")
                         except Exception as e:
                             print(f"Error applying weather overlay: {e}")
-
+                    
                     self.set_windows_background(image_path)
                     return
                 else:
                     print(f"Failed to fetch image. Status code: {response.status_code}")
             
-            except RequestException as e:
-                print(f"Network error on attempt {attempt + 1}: {e}")
+            except (RequestException, UnidentifiedImageError) as e:
+                print(f"Error on attempt {attempt + 1}: {e}")
             except Exception as e:
                 print(f"Unexpected error on attempt {attempt + 1}: {e}")
             
@@ -431,13 +543,15 @@ class PollinationsBackgroundSetter:
             "wallpaper_style": self.wallpaper_style.get(),
             "interval": self.interval,
             "always_on_top": self.always_on_top.get(),
+            "model": self.model.get(),
             "use_weather": self.use_weather.get(),
             "overlay_weather": self.overlay_weather.get(),
             "overlay_opacity": self.overlay_opacity.get(),
             "overlay_position": self.overlay_position.get(),
             "use_drop_shadow": self.use_drop_shadow.get(),
             "weather_api_key": self.weather_api_key.get(),
-            "temp_unit": self.temp_unit.get()
+            "temp_unit": self.temp_unit.get(),
+            "overlay_color": self.overlay_color.get()
         }
         with open('background_settings.json', 'w') as f:
             json.dump(settings, f)
@@ -450,6 +564,7 @@ class PollinationsBackgroundSetter:
                 self.wallpaper_style.set(settings.get("wallpaper_style", "fill"))
                 self.interval = max(300, settings.get("interval", 300))
                 self.always_on_top.set(settings.get("always_on_top", False))
+                self.model.set(settings.get("model", "flux"))
                 self.use_weather.set(settings.get("use_weather", False))
                 self.overlay_weather.set(settings.get("overlay_weather", False))
                 self.overlay_opacity.set(settings.get("overlay_opacity", 128))
@@ -457,13 +572,17 @@ class PollinationsBackgroundSetter:
                 self.use_drop_shadow.set(settings.get("use_drop_shadow", False))
                 self.weather_api_key.set(settings.get("weather_api_key", ""))
                 self.temp_unit.set(settings.get("temp_unit", "F"))
+                self.overlay_color.set(settings.get("overlay_color", "#000000"))
                 
                 if self.weather_api_key.get():
                     os.environ['OPENWEATHER_API_KEY'] = self.weather_api_key.get()
-                    
-                self.update_position_options()  # Add this line to update options after loading
+                
+                self.update_position_options()
                 self.update_color_button()
                 self.toggle_always_on_top()
+
+        # Apply loaded settings to the UI
+        self.apply_loaded_settings()
 
     def set_windows_background(self, image_path):
         try:
@@ -509,6 +628,8 @@ class PollinationsBackgroundSetter:
         
         time_description = "sunny" if time_of_day == "day" else "with a visible moon"
         
+        self.current_weather_conditions = f"{weather_condition}, {time_of_day}time, {time_description}"
+        
         return f"A photographic image of {weather_condition.lower()} weather during {time_of_day}time, {time_description}"
 
     def apply_weather_overlay(self, image_path, weather_data):
@@ -540,7 +661,6 @@ class PollinationsBackgroundSetter:
 
         if is_span:
             left_monitor_width = img_width // 2
-            right_monitor_width = img_width - left_monitor_width
             positions = {
                 "left_top_left": (padding, padding),
                 "left_top_right": (left_monitor_width - text_width - padding, padding),
@@ -581,29 +701,59 @@ class PollinationsBackgroundSetter:
 
         return img
 
-    def save_settings(self):
-        settings = {
-            "enhance": self.enhance.get(),
-            "wallpaper_style": self.wallpaper_style.get(),
-            "interval": self.interval,
-            "overlay_color": self.overlay_color.get(),
-            "always_on_top": self.always_on_top.get()
-        }
-        with open('background_settings.json', 'w') as f:
-            json.dump(settings, f)
-
-    def load_settings(self):
-        if os.path.exists('background_settings.json'):
-            with open('background_settings.json', 'r') as f:
-                settings = json.load(f)
-                self.enhance.set(settings.get("enhance", False))
-                self.wallpaper_style.set(settings.get("wallpaper_style", "fill"))
-                self.interval = max(300, settings.get("interval", 300))
-                self.always_on_top.set(settings.get("always_on_top", False))                
-                self.overlay_color.set(settings.get("overlay_color", "#000000"))
-                                
+    def apply_loaded_settings(self):
+        # Update Start/Stop button
+        if hasattr(self, 'start_stop_button'):
+            self.start_stop_button.config(text="Stop" if getattr(self, 'is_running', False) else "Start")
+        
+        # Update Enhance checkbox
+        if hasattr(self, 'enhance'):
+            self.enhance.set(self.enhance.get())
+        
+        # Update Wallpaper Style dropdown
+        if hasattr(self, 'wallpaper_style'):
+            self.wallpaper_style.set(self.wallpaper_style.get())
+        
+        # Update Model dropdown
+        if hasattr(self, 'model'):
+            self.model.set(self.model.get())
+        
+        # Update Overlay Opacity scale
+        if hasattr(self, 'overlay_opacity'):
+            self.overlay_opacity.set(self.overlay_opacity.get())
+        
+        # Update Overlay Position dropdown
+        if hasattr(self, 'overlay_position'):
+            self.overlay_position.set(self.overlay_position.get())
+        
+        # Update Overlay Color button
+        if hasattr(self, 'color_button'):
+            self.color_button.config(bg=self.overlay_color.get())
+        
+        # Update Drop Shadow checkbox
+        if hasattr(self, 'use_drop_shadow'):
+            self.use_drop_shadow.set(self.use_drop_shadow.get())
+        
+        # Update Use Weather-Based Prompts checkbox
+        if hasattr(self, 'use_weather'):
+            self.use_weather.set(self.use_weather.get())
+        
+        # Update Overlay Weather Info checkbox
+        if hasattr(self, 'overlay_weather'):
+            self.overlay_weather.set(self.overlay_weather.get())
+        
+        # Update Temperature Unit radio buttons
+        if hasattr(self, 'temp_unit'):
+            self.temp_unit.set(self.temp_unit.get())
+        
+        # Update Always on Top
+        if hasattr(self, 'always_on_top'):
+            self.always_on_top.set(self.always_on_top.get())
+        
+        # Trigger necessary UI updates
+        self.update_position_options()
         self.update_color_button()
-        self.toggle_always_on_top()
+        self.toggle_always_on_top()  # This line was mistakenly removed and is now added back
 
     def on_closing(self):
         self.stop_setter()
