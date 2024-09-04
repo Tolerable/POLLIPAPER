@@ -1,0 +1,21 @@
+# Ignore backup versions
+POLLIPAPER-*.py
+
+# Ignore Python cache files
+__pycache__/
+*.py[cod]
+
+# Ignore environment files
+.env
+
+# Ignore generated images
+POLLINATIONS_BACKGROUNDS/
+
+# Ignore settings and history files
+background_settings.json
+prompt_history.json
+weather_data.json
+
+# Ignore system files
+.DS_Store
+Thumbs.db
