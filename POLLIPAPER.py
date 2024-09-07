@@ -226,6 +226,10 @@ class PollinationsBackgroundSetter:
 
         ttk.Checkbutton(overlay_frame, text="Drop Shadow", variable=self.use_drop_shadow).pack(side=tk.LEFT)
 
+        # Add a button in the UI to remove the selected prompt from history
+        remove_button = ttk.Button(self.frame, text="Remove from History", command=self.remove_selected_from_history)
+        remove_button.pack()
+
         # Current Image Information frame
         info_frame = ttk.LabelFrame(self.frame, text="Current Image Information", padding="5")
         info_frame.pack(fill=tk.BOTH, expand=True, pady=10)
@@ -272,6 +276,37 @@ class PollinationsBackgroundSetter:
         self.current_prompt_display = tk.Text(self.frame, wrap=tk.WORD, height=3, state='disabled')
         self.current_prompt_display.pack(fill=tk.X)
 
+    def cleanup_background_images(self):
+        backgrounds = sorted(
+            [f for f in os.listdir(self.image_dir) if f.startswith("background_") and f.endswith(".png")],
+            key=lambda x: os.path.getmtime(os.path.join(self.image_dir, x)),
+            reverse=True
+        )
+        
+        wallpapers = sorted(
+            [f for f in os.listdir(self.image_dir) if f.startswith("wallpaper_") and f.endswith(".png")],
+            key=lambda x: os.path.getmtime(os.path.join(self.image_dir, x)),
+            reverse=True
+        )
+        
+        # Keep only the 5 most recent background images
+        for old_bg in backgrounds[5:]:
+            try:
+                os.remove(os.path.join(self.image_dir, old_bg))
+                print(f"Deleted old background: {old_bg}")
+            except Exception as e:
+                print(f"Error deleting {old_bg}: {e}")
+        
+        # Keep only the most recent wallpaper image
+        for old_wp in wallpapers[1:]:
+            try:
+                os.remove(os.path.join(self.image_dir, old_wp))
+                print(f"Deleted old wallpaper: {old_wp}")
+            except Exception as e:
+                print(f"Error deleting {old_wp}: {e}")
+        
+        print(f"After cleanup: {len(backgrounds[:5])} backgrounds and {len(wallpapers[:1])} wallpapers kept.")
+
     def update_position_options(self, *args):
         if self.wallpaper_style.get() == "span":
             options = ["left_top_left", "left_top_right", "left_bottom_left", "left_bottom_right",
@@ -306,22 +341,38 @@ class PollinationsBackgroundSetter:
             print(f"Error updating current prompt display: {e}")
 
     def update_prompt_info(self, original_prompt, returned_prompt):
-        print(f"Updating prompts - Original: {original_prompt}, Returned: {returned_prompt}")
+        print(f"Updating prompts - Original: {original_prompt}")
+        print(f"Full returned data: {returned_prompt}")
         
         self.submitted_prompt.set(original_prompt)
-        self.returned_prompt.set(returned_prompt)
+        if self.enhance.get():
+            # Try to extract the enhanced prompt
+            enhanced_prompt = re.search(r'"([^"]*)"', returned_prompt)
+            if enhanced_prompt:
+                cleaned_prompt = enhanced_prompt.group(1)
+            else:
+                # If no quotes found, use the entire returned prompt
+                cleaned_prompt = returned_prompt
+            
+            # Remove the original prompt if it appears at the end of the returned prompt
+            cleaned_prompt = cleaned_prompt.replace(original_prompt.strip(), '').strip()
+            
+            print(f"Cleaned enhanced prompt: {cleaned_prompt}")
+            self.returned_prompt.set(cleaned_prompt)
+        else:
+            self.returned_prompt.set(original_prompt)
         
         # Update the Text widgets
         if hasattr(self, 'submitted_prompt_display'):
             self.submitted_prompt_display.config(state='normal')
             self.submitted_prompt_display.delete(1.0, tk.END)
-            self.submitted_prompt_display.insert(tk.END, original_prompt)
+            self.submitted_prompt_display.insert(tk.END, self.submitted_prompt.get())
             self.submitted_prompt_display.config(state='disabled')
         
         if hasattr(self, 'returned_prompt_display'):
             self.returned_prompt_display.config(state='normal')
             self.returned_prompt_display.delete(1.0, tk.END)
-            self.returned_prompt_display.insert(tk.END, returned_prompt)
+            self.returned_prompt_display.insert(tk.END, self.returned_prompt.get())
             self.returned_prompt_display.config(state='disabled')
         
         if self.use_weather.get():
@@ -376,25 +427,46 @@ class PollinationsBackgroundSetter:
         self.prompt_entry.insert(tk.END, selected_prompt)
 
     def add_to_history(self, prompt):
-        if prompt and prompt not in self.prompt_history:
+        if prompt:
+            # Remove the prompt if it already exists in the history
+            self.prompt_history = deque([p for p in self.prompt_history if p != prompt], maxlen=20)
+            # Add the prompt to the beginning of the history
             self.prompt_history.appendleft(prompt)
             self.update_history_dropdown()
             self.save_history()
+            print(f"Added to history: {prompt}")  # Debug print
+
+    def remove_from_history(self, prompt):
+        if prompt in self.prompt_history:
+            self.prompt_history.remove(prompt)
+            self.update_history_dropdown()
+            self.save_history()
+
+    def remove_selected_from_history(self):
+        selected = self.history_var.get()
+        if selected:
+            self.remove_from_history(selected)
 
     def update_history_dropdown(self):
-        self.history_dropdown['values'] = list(self.prompt_history)
-        if self.prompt_history:
-            self.history_var.set(self.prompt_history[0])
+        history_list = list(self.prompt_history)
+        self.history_dropdown['values'] = history_list
+        if history_list:
+            self.history_var.set(history_list[0])
+        print(f"Updated history dropdown. Current history: {history_list}")  # Debug print
 
     def save_history(self):
         with open('prompt_history.json', 'w') as f:
             json.dump(list(self.prompt_history), f)
+        print(f"Saved history: {list(self.prompt_history)}")  # Debug print
 
     def load_history(self):
         if os.path.exists('prompt_history.json'):
             with open('prompt_history.json', 'r') as f:
                 self.prompt_history = deque(json.load(f), maxlen=20)
+        else:
+            self.prompt_history = deque(maxlen=20)
         self.update_history_dropdown()
+        print(f"Loaded history: {list(self.prompt_history)}")  # Debug print
 
     def start_setter(self):
         if self.use_weather.get():
@@ -417,11 +489,12 @@ class PollinationsBackgroundSetter:
                 else:
                     messagebox.showerror("Missing Prompt", "Please enter a prompt or ensure there is one in history.")
                     return
-            self.add_to_history(prompt)
-            try:
-                self.update_current_prompt_display(prompt)
-            except Exception as e:
-                print(f"Error updating current prompt display: {e}")
+            self.add_to_history(prompt)  # Only add to history if it's not a weather-based prompt
+
+        try:
+            self.update_current_prompt_display(prompt)
+        except Exception as e:
+            print(f"Error updating current prompt display: {e}")
 
         self.is_running = True
         self.start_stop_button.config(text="Stop")
@@ -432,8 +505,10 @@ class PollinationsBackgroundSetter:
 
     def stop_setter(self):
         self.is_running = False
+        self.current_request_id = None  # This will invalidate any ongoing requests
+        if self.setter_thread and self.setter_thread.is_alive():
+            self.setter_thread.join(timeout=1)  # Wait for the thread to finish, but not indefinitely
         self.start_stop_button.config(text="Start")
-        self.current_request_id = None
 
     def run_setter(self, prompt, interval, request_id):
         while self.is_running and request_id == self.current_request_id:
@@ -450,6 +525,9 @@ class PollinationsBackgroundSetter:
         max_retries = 5
         retry_delay = 5
         for attempt in range(max_retries):
+            if not self.is_running or request_id != self.current_request_id:
+                print("Operation cancelled.")
+                return
             try:
                 seed = random.randint(1, 1000000)
                 enhance_param = "true" if self.enhance.get() else "false"
@@ -457,13 +535,22 @@ class PollinationsBackgroundSetter:
                 
                 width, height = self.get_image_dimensions(style)
                 print(f"Style: {style}, Dimensions: {width}x{height}")
+                
                 weather_data = None
-                if self.use_weather.get() or self.overlay_weather.get():
+                if self.overlay_weather.get() or self.use_weather.get():
                     weather_data = self.weather_fetcher.fetch_weather_data()
-                    if self.use_weather.get() and weather_data:
-                        prompt = self.generate_weather_prompt(weather_data)
-                    elif self.use_weather.get():
-                        print("Failed to fetch weather data. Using original prompt.")
+                    if not weather_data:
+                        print("Failed to fetch weather data.")
+                        if self.use_weather.get():
+                            print("Cannot generate weather-based image. Using user prompt.")
+                            self.use_weather.set(False)  # Temporarily disable weather-based prompt
+                
+                if self.use_weather.get() and weather_data:
+                    prompt = self.generate_weather_prompt(weather_data)
+                    print(f"Using weather-based prompt: {prompt}")
+                else:
+                    print(f"Using user prompt: {prompt}")
+                
                 url = f"https://image.pollinations.ai/prompt/{prompt}?nologo=true&nofeed=true&model={self.model.get()}&enhance={enhance_param}&seed={seed}&width={width}&height={height}"
                 print(f"Attempt {attempt + 1}: Fetching image with URL: {url}")
                 
@@ -480,26 +567,23 @@ class PollinationsBackgroundSetter:
                         
                         # Extract metadata from EXIF
                         exif_data = image.info.get('exif', b'')
-                        if exif_data:
+                        if exif_data and self.enhance.get():
                             # Find the JSON string in the EXIF data
                             json_match = re.search(b'{"prompt":.*}', exif_data)
                             if json_match:
                                 json_str = json_match.group(0).decode('utf-8')
                                 try:
                                     metadata_dict = json.loads(json_str)
-                                    print(f"Parsed metadata: {metadata_dict}")
                                     returned_prompt = metadata_dict.get('prompt', 'Unable to retrieve returned prompt')
-                                    original_prompt = metadata_dict.get('originalPrompt', prompt)
-                                    self.update_prompt_info(original_prompt, returned_prompt)
+                                    self.update_prompt_info(prompt, returned_prompt)
                                 except json.JSONDecodeError as e:
                                     print(f"Failed to parse JSON in metadata: {e}")
-                                    self.update_prompt_info(prompt, 'Unable to parse metadata')
+                                    self.update_prompt_info(prompt, prompt)
                             else:
                                 print("No JSON data found in EXIF")
-                                self.update_prompt_info(prompt, 'No JSON data found in metadata')
+                                self.update_prompt_info(prompt, prompt)
                         else:
-                            print("No EXIF data found in the image.")
-                            self.update_prompt_info(prompt, 'No metadata found')
+                            self.update_prompt_info(prompt, prompt)
                         
                         if (actual_width, actual_height) != (width, height):
                             print(f"Warning: Received image dimensions ({actual_width}x{actual_height}) "
@@ -507,20 +591,26 @@ class PollinationsBackgroundSetter:
                     except UnidentifiedImageError:
                         print(f"Error: Received data is not a valid image. Retrying...")
                         raise  # This will trigger the retry mechanism
-            
-                    image_path = os.path.join(self.image_dir, f"background_{int(time.time())}.png")
+                
+                    timestamp = int(time.time())
+                    image_path = os.path.join(self.image_dir, f"background_{timestamp}.png")
                     image.save(image_path, 'PNG')
                     print(f"Image saved to {image_path}")
                     
                     if self.overlay_weather.get() and weather_data:
                         try:
-                            image = self.apply_weather_overlay(image_path, weather_data)
-                            image.save(image_path)
-                            print(f"Weather overlay added to {image_path}")
+                            overlay_image = self.apply_weather_overlay(image.copy(), weather_data)
+                            wallpaper_path = os.path.join(self.image_dir, f"wallpaper_{timestamp}.png")
+                            overlay_image.save(wallpaper_path)
+                            print(f"Weather overlay added to {wallpaper_path}")
+                            self.set_windows_background(wallpaper_path)
                         except Exception as e:
                             print(f"Error applying weather overlay: {e}")
+                            self.set_windows_background(image_path)
+                    else:
+                        self.set_windows_background(image_path)
                     
-                    self.set_windows_background(image_path)
+                    self.cleanup_background_images()
                     return
                 else:
                     print(f"Failed to fetch image. Status code: {response.status_code}")
@@ -623,17 +713,41 @@ class PollinationsBackgroundSetter:
             pythoncom.CoUninitialize()
 
     def generate_weather_prompt(self, weather_data):
-        weather_condition = weather_data['weather'][0]['main']
-        time_of_day = "day" if weather_data['dt'] < weather_data['sys']['sunset'] else "night"
+        weather_condition = weather_data['weather'][0]['main'].lower()
+        current_time = time.localtime()
         
-        time_description = "sunny" if time_of_day == "day" else "with a visible moon"
+        # Determine time of day
+        if 5 <= current_time.tm_hour < 12:
+            time_of_day = "morning"
+        elif 12 <= current_time.tm_hour < 17:
+            time_of_day = "afternoon"
+        elif 17 <= current_time.tm_hour < 21:
+            time_of_day = "evening"
+        else:
+            time_of_day = "night"
         
-        self.current_weather_conditions = f"{weather_condition}, {time_of_day}time, {time_description}"
+        # Adjust description based on weather and time
+        if weather_condition in ['clear', 'clouds']:
+            if time_of_day in ['morning', 'afternoon']:
+                description = "with sunlight"
+            elif time_of_day == 'evening':
+                description = "during sunset"
+            else:
+                description = "under moonlight"
+        elif weather_condition in ['rain', 'drizzle']:
+            description = "with rainfall"
+        elif weather_condition == 'thunderstorm':
+            description = "with lightning"
+        elif weather_condition == 'snow':
+            description = "with snowfall"
+        else:
+            description = f"during {weather_condition} conditions"
         
-        return f"A photographic image of {weather_condition.lower()} weather during {time_of_day}time, {time_description}"
+        self.current_weather_conditions = f"{weather_condition.capitalize()}, {time_of_day}, {description}"
+        
+        return f"A photorealistic image of {weather_condition} weather during {time_of_day}, {description}"
 
-    def apply_weather_overlay(self, image_path, weather_data):
-        img = Image.open(image_path)
+    def apply_weather_overlay(self, img, weather_data):
         draw = ImageDraw.Draw(img, 'RGBA')
         font = ImageFont.truetype("arial.ttf", 20)
 
@@ -645,59 +759,67 @@ class PollinationsBackgroundSetter:
             temp = (temp * 9/5) + 32
             feels_like = (feels_like * 9/5) + 32
 
-        weather_text = (f"Temp: {temp:.1f}°{temp_unit}\n"
-                        f"Feels like: {feels_like:.1f}°{temp_unit}\n"
-                        f"Weather: {weather_data['weather'][0]['description']}\n"
-                        f"Humidity: {weather_data['main']['humidity']}%\n"
-                        f"Wind: {weather_data['wind']['speed']} m/s")
+        weather_text = f"Temp: {temp:.1f}°{temp_unit}"
+        weather_text += f"\nFeels like: {feels_like:.1f}°{temp_unit}"
+        weather_text += f"\nWeather: {weather_data['weather'][0]['description']}"
+        weather_text += f"\nHumidity: {weather_data['main']['humidity']}%"
+        weather_text += f"\nWind: {weather_data['wind']['speed']:.2f} m/s"
 
-        wrapped_text = textwrap.wrap(weather_text, width=23)
-        
         padding = 20
-        text_width, text_height = draw.multiline_textbbox((0, 0), "\n".join(wrapped_text), font=font)[2:]
+        line_spacing = 5
+        
+        # Calculate text dimensions
+        lines = weather_text.split('\n')
+        max_line_width = max(draw.textlength(line, font=font) for line in lines)
+        text_height = sum(draw.textbbox((0, 0), line, font=font)[3] for line in lines) + line_spacing * (len(lines) - 1)
         
         is_span = self.wallpaper_style.get() == "span"
         img_width, img_height = img.size
 
         if is_span:
             left_monitor_width = img_width // 2
+            right_padding = padding  # Use the same padding as the left side
             positions = {
                 "left_top_left": (padding, padding),
-                "left_top_right": (left_monitor_width - text_width - padding, padding),
-                "left_bottom_left": (padding, img_height - text_height - padding),
-                "left_bottom_right": (left_monitor_width - text_width - padding, img_height - text_height - padding),
+                "left_top_right": (left_monitor_width - max_line_width - padding * 2 - right_padding, padding),
+                "left_bottom_left": (padding, img_height - text_height - padding * 2),
+                "left_bottom_right": (left_monitor_width - max_line_width - padding * 2 - right_padding, img_height - text_height - padding * 2),
                 "right_top_left": (left_monitor_width + padding, padding),
-                "right_top_right": (img_width - text_width - padding, padding),
-                "right_bottom_left": (left_monitor_width + padding, img_height - text_height - padding),
-                "right_bottom_right": (img_width - text_width - padding, img_height - text_height - padding)
+                "right_top_right": (img_width - max_line_width - padding * 2 - right_padding, padding),
+                "right_bottom_left": (left_monitor_width + padding, img_height - text_height - padding * 2),
+                "right_bottom_right": (img_width - max_line_width - padding * 2 - right_padding, img_height - text_height - padding * 2)
             }
         else:
             positions = {
                 "top_left": (padding, padding),
-                "top_right": (img_width - text_width - padding, padding),
-                "bottom_left": (padding, img_height - text_height - padding),
-                "bottom_right": (img_width - text_width - padding, img_height - text_height - padding)
+                "top_right": (img_width - max_line_width - padding * 2, padding),
+                "bottom_left": (padding, img_height - text_height - padding * 2),
+                "bottom_right": (img_width - max_line_width - padding * 2, img_height - text_height - padding * 2)
             }
 
         position = self.overlay_position.get()
-        x, y = positions.get(position, (padding, padding))  # Default to top-left if position is not found
+        x, y = positions.get(position, (padding, padding))
 
         # Convert hex color to RGBA
         rgb_color = tuple(int(self.overlay_color.get()[i:i+2], 16) for i in (1, 3, 5))
         background_color = rgb_color + (self.overlay_opacity.get(),)
 
         # Add semi-transparent background
-        background_bbox = [x, y, x + text_width + padding, y + text_height + padding]
+        background_bbox = [x, y, x + max_line_width + padding * 2, y + text_height + padding * 2]
         draw.rectangle(background_bbox, fill=background_color)
 
         # Apply drop shadow if enabled
         if self.use_drop_shadow.get():
             shadow_color = (0, 0, 0, 100)
             shadow_offset = 2
-            draw.multiline_text((x + shadow_offset, y + shadow_offset), "\n".join(wrapped_text), font=font, fill=shadow_color)
+            for i, line in enumerate(lines):
+                line_y = y + padding + i * (font.size + line_spacing) + shadow_offset
+                draw.text((x + padding + shadow_offset, line_y), line, font=font, fill=shadow_color)
 
         # Draw text
-        draw.multiline_text((x, y), "\n".join(wrapped_text), font=font, fill=(255, 255, 255, 255))
+        for i, line in enumerate(lines):
+            line_y = y + padding + i * (font.size + line_spacing)
+            draw.text((x + padding, line_y), line, font=font, fill=(255, 255, 255, 255))
 
         return img
 
