@@ -19,3 +19,21 @@ weather_data.json
 # Ignore system files
 .DS_Store
 Thumbs.db
+
+# === Added from MASTER_GITIGNORE ===
+# Secrets and keys - NEVER COMMIT
+.env
+.env.*
+keystore.json
+*_keys.json
+db_keys.json
+config.py
+credentials.json
+secrets.json
+*.pem
+*.key
+*-[0-9][0-9][0-9][0-9].*
+*-[0-9][0-9][0-9][0-9]-*.*
+sandbox_versions/
+_archive/
+_backup*/
